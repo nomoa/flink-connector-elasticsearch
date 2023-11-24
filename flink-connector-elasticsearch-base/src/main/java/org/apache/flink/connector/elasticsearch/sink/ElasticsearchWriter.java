@@ -42,7 +42,6 @@ import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.RestHighLevelClient;
-import org.elasticsearch.rest.RestStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +57,7 @@ class ElasticsearchWriter<IN> implements SinkWriter<IN> {
 
     private final ElasticsearchEmitter<? super IN> emitter;
     private final MailboxExecutor mailboxExecutor;
+    private final BulkItemResponseHandler responseHandler;
     private final boolean flushOnCheckpoint;
     private final BulkProcessor bulkProcessor;
     private final RestHighLevelClient client;
@@ -84,6 +84,7 @@ class ElasticsearchWriter<IN> implements SinkWriter<IN> {
      *     the elasticsearch cluster
      * @param metricGroup for the sink writer
      * @param mailboxExecutor Flink's mailbox executor
+     * @param responseHandler bulk item response handler
      */
     ElasticsearchWriter(
             List<HttpHost> hosts,
@@ -93,10 +94,12 @@ class ElasticsearchWriter<IN> implements SinkWriter<IN> {
             BulkProcessorBuilderFactory bulkProcessorBuilderFactory,
             NetworkClientConfig networkClientConfig,
             SinkWriterMetricGroup metricGroup,
-            MailboxExecutor mailboxExecutor) {
+            MailboxExecutor mailboxExecutor,
+            BulkItemResponseHandler<? super IN> responseHandler) {
         this.emitter = checkNotNull(emitter);
         this.flushOnCheckpoint = flushOnCheckpoint;
         this.mailboxExecutor = checkNotNull(mailboxExecutor);
+        this.responseHandler = responseHandler;
         this.client =
                 new RestHighLevelClient(
                         configureRestClientBuilder(
@@ -216,7 +219,7 @@ class ElasticsearchWriter<IN> implements SinkWriter<IN> {
         public void afterBulk(long executionId, BulkRequest request, BulkResponse response) {
             ackTime = System.currentTimeMillis();
             enqueueActionInMailbox(
-                    () -> extractFailures(request, response), "elasticsearchSuccessCallback");
+                    () -> onResponse(request, response), "elasticsearchSuccessCallback");
         }
 
         @Override
@@ -241,48 +244,41 @@ class ElasticsearchWriter<IN> implements SinkWriter<IN> {
         mailboxExecutor.execute(action, actionName);
     }
 
-    private void extractFailures(BulkRequest request, BulkResponse response) {
-        if (!response.hasFailures()) {
-            pendingActions -= request.numberOfActions();
-            return;
-        }
-
+    private void onResponse(BulkRequest request, BulkResponse response) {
         Throwable chainedFailures = null;
+        int success = 0;
+        int retried = 0;
         for (int i = 0; i < response.getItems().length; i++) {
-            final BulkItemResponse itemResponse = response.getItems()[i];
-            if (!itemResponse.isFailed()) {
-                continue;
-            }
-            final Throwable failure = itemResponse.getFailure().getCause();
-            if (failure == null) {
-                continue;
-            }
-            final RestStatus restStatus = itemResponse.getFailure().getStatus();
             final DocWriteRequest<?> actionRequest = request.requests().get(i);
-
-            chainedFailures =
-                    firstOrSuppressed(
-                            wrapException(restStatus, failure, actionRequest), chainedFailures);
+            final BulkItemResponse itemResponse = response.getItems()[i];
+            BulkItemResponseHandler.Result<? extends IN> result =
+                    responseHandler.onResponse(actionRequest, itemResponse);
+            switch (result.status()) {
+                case SUCCESS:
+                    success++;
+                    break;
+                case ERROR:
+                    chainedFailures = firstOrSuppressed(result.failure(), chainedFailures);
+                    break;
+                case RETRY:
+                    retried++;
+                    bulkProcessor.add(result.retryAction());
+                    break;
+                default:
+                    throw new UnsupportedOperationException("Unsupported value:" + result.status());
+            }
         }
-        if (chainedFailures == null) {
-            return;
+        if (chainedFailures != null) {
+            throw new FlinkRuntimeException(chainedFailures);
         }
-        throw new FlinkRuntimeException(chainedFailures);
-    }
-
-    private static Throwable wrapException(
-            RestStatus restStatus, Throwable rootFailure, DocWriteRequest<?> actionRequest) {
-        if (restStatus == null) {
-            return new FlinkRuntimeException(
-                    String.format("Single action %s of bulk request failed.", actionRequest),
-                    rootFailure);
-        } else {
-            return new FlinkRuntimeException(
-                    String.format(
-                            "Single action %s of bulk request failed with status %s.",
-                            actionRequest, restStatus.getStatus()),
-                    rootFailure);
+        if ((success + retried) != request.numberOfActions()) {
+            throw new FlinkRuntimeException(
+                    "Expected "
+                            + request.numberOfActions()
+                            + " actions but processed "
+                            + (success + retried));
         }
+        pendingActions -= success;
     }
 
     private boolean isClosed() {

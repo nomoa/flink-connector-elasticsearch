@@ -285,7 +285,8 @@ class ElasticsearchWriterITCase {
                 new TestBulkProcessorBuilderFactory(),
                 new NetworkClientConfig(null, null, null, null, null, null),
                 metricGroup,
-                new TestMailbox());
+                new TestMailbox(),
+                new DefaultBulkItemResponseHandler<>());
     }
 
     private TestingSinkWriterMetricGroup getSinkWriterMetricGroup() {

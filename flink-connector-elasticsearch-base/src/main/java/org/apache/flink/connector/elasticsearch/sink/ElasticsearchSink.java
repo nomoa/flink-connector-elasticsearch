@@ -58,6 +58,7 @@ public class ElasticsearchSink<IN> implements Sink<IN> {
     private final ElasticsearchEmitter<? super IN> emitter;
     private final BulkProcessorConfig buildBulkProcessorConfig;
     private final BulkProcessorBuilderFactory bulkProcessorBuilderFactory;
+    private final BulkItemResponseHandler<? super IN> responseHandler;
     private final NetworkClientConfig networkClientConfig;
     private final DeliveryGuarantee deliveryGuarantee;
 
@@ -67,9 +68,11 @@ public class ElasticsearchSink<IN> implements Sink<IN> {
             DeliveryGuarantee deliveryGuarantee,
             BulkProcessorBuilderFactory bulkProcessorBuilderFactory,
             BulkProcessorConfig buildBulkProcessorConfig,
-            NetworkClientConfig networkClientConfig) {
+            NetworkClientConfig networkClientConfig,
+            BulkItemResponseHandler<? super IN> responseHandler) {
         this.hosts = checkNotNull(hosts);
         this.bulkProcessorBuilderFactory = checkNotNull(bulkProcessorBuilderFactory);
+        this.responseHandler = responseHandler;
         checkArgument(!hosts.isEmpty(), "Hosts cannot be empty.");
         this.emitter = checkNotNull(emitter);
         this.deliveryGuarantee = checkNotNull(deliveryGuarantee);
@@ -79,6 +82,7 @@ public class ElasticsearchSink<IN> implements Sink<IN> {
 
     @Override
     public SinkWriter<IN> createWriter(InitContext context) throws IOException {
+        responseHandler.open(context);
         return new ElasticsearchWriter<>(
                 hosts,
                 emitter,
@@ -87,7 +91,8 @@ public class ElasticsearchSink<IN> implements Sink<IN> {
                 bulkProcessorBuilderFactory,
                 networkClientConfig,
                 context.metricGroup(),
-                context.getMailboxExecutor());
+                context.getMailboxExecutor(),
+                responseHandler);
     }
 
     @VisibleForTesting

@@ -51,6 +51,8 @@ public abstract class ElasticsearchSinkBuilderBase<
     private DeliveryGuarantee deliveryGuarantee = DeliveryGuarantee.AT_LEAST_ONCE;
     private List<HttpHost> hosts;
     protected ElasticsearchEmitter<? super IN> emitter;
+    private BulkItemResponseHandler<? super IN> responseHandler =
+            new DefaultBulkItemResponseHandler<>();
     private String username;
     private String password;
     private String connectionPathPrefix;
@@ -258,6 +260,18 @@ public abstract class ElasticsearchSinkBuilderBase<
         return self();
     }
 
+    /**
+     * Sets the response handler for classifying individual item responses.
+     *
+     * @param responseHandler
+     * @return this builder
+     */
+    public ElasticsearchSinkBuilderBase<IN, B> setResponseHandler(
+            BulkItemResponseHandler<? super IN> responseHandler) {
+        this.responseHandler = responseHandler;
+        return this;
+    }
+
     protected abstract BulkProcessorBuilderFactory getBulkProcessorBuilderFactory();
 
     /**
@@ -282,7 +296,8 @@ public abstract class ElasticsearchSinkBuilderBase<
                 deliveryGuarantee,
                 bulkProcessorBuilderFactory,
                 bulkProcessorConfig,
-                networkClientConfig);
+                networkClientConfig,
+                responseHandler);
     }
 
     private NetworkClientConfig buildNetworkClientConfig() {
